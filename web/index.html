@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>基于多智能体协作的供热运营数据查询与分析系统</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>基于多智能体协作的供热运营数据查询与分析系统</h1>
+      <p class="brand-sub">检索员 → 分析师 → 撰稿人 → 审核员（审核不通过则带意见重算）</p>
+    </div>
+  </div>
+  <div class="status-pills" id="statusPills" aria-live="polite"></div>
+</header>
+
+<main class="layout">
+
+  <!-- 左栏：提问 + 协作过程 + 审核结论 -->
+  <section class="pane pane-left" aria-label="提问与协作过程">
+
+    <form id="askForm" class="ask">
+      <label class="ask-label" for="question">提问</label>
+      <p class="section-label">提问</p>
+      <textarea id="question" rows="3" spellcheck="false"
+        placeholder="例如：公司A今天的气耗指标是多少？&#10;Ctrl/⌘ + Enter 提交"></textarea>
+      <div class="ask-actions">
+        <button type="submit" id="askBtn" class="btn btn-primary">开始分析</button>
+        <button type="button" id="stopBtn" class="btn" hidden>中断</button>
+      </div>
+    </form>
+
+    <div>
+      <p class="section-label">示例问题</p>
+      <div class="chips" id="exampleChips"></div>
+    </div>
+
+    <div>
+      <p class="section-label">协作过程</p>
+      <div id="agents"></div>
+    </div>
+
+    <div id="reviewCard" hidden></div>
+  </section>
+
+  <!-- 右栏：思考过程 → 报告 / 指标结果表 / 图表看板 -->
+  <section class="pane pane-right" id="reportPane" aria-label="分析报告">
+    <div class="empty" id="emptyState">
+      <h2>尚未发起分析</h2>
+      <p>在左侧输入供热运营相关的问题，或点击一个示例问题。
+         系统会依次驱动检索员、分析师、撰稿人与审核员协作，四者的思考过程会在这里实时滚动呈现，
+         跑完后紧接着给出报告。</p>
+    </div>
+    <section class="process" id="process" hidden aria-label="思考过程">
+      <div class="process-head">
+        <h2>思考过程</h2>
+        <span class="process-hint" id="processHint"></span>
+        <button type="button" class="btn btn-sm" id="processToggle" aria-expanded="true">收起</button>
+      </div>
+      <div class="process-body" id="processBody"></div>
+    </section>
+    <article class="report" id="report" hidden></article>
+  </section>
+
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
