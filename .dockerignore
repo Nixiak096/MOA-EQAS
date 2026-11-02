@@ -1,0 +1,31 @@
+# 构建镜像时排除的内容
+# 关键：.env 含真实密钥（DB 口令、大模型 API Key），绝不能烤进镜像层
+.env
+.env.*
+!.env.example
+
+# 开发机上的本地向量库与上传暂存区（容器内应连 Milvus 服务端，不用 Lite 文件）
+milvus_data/
+uploads/
+# 本地向量模型目录：容器里靠 volume 挂载，不必进构建上下文
+# （若把 bert-base-chinese 放进来会有约 400MB，撑大构建上下文）
+models/
+
+# 测试与本地产物
+tests/
+experiments/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+
+# 文档与数据资产通过 volume 挂载，不复制进镜像
+documents/
+
+# 其他
+.git/
+.gitignore
+readme.md
+*.md

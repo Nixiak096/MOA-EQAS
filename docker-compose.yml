@@ -1,0 +1,239 @@
+# 供热运营数据查询与分析系统 —— 部署编排
+#
+# 首次部署：cp .env.example .env 填好 DB_PASSWORD / LLM_* 等，然后
+#     docker-compose up -d --build
+# 起来后浏览器访问 http://localhost/ 即可（nginx → agent-app:5000）。
+#
+# 关于向量模型：默认按 .env 的 EMBEDDING_PROVIDER 走。
+#   * local（默认）：需把 bert-base-chinese 放到 ./models/bert-base-chinese/，
+#     或用 EMBEDDING_LOCAL_DIR 指向本机已有目录；
+#   * openai：改用 API 向量模型，无需本地模型，但 EMBEDDING_DIM 要与模型一致。
+# 注意：知识库必须用与查询时相同的向量模型构建，否则维度/语义都不匹配。
+
+services:
+
+  # ---------------- 关系数据库（供热运营数据）----------------
+  mysql:
+    image: mysql:8.0
+    container_name: heating-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-123456}
+      MYSQL_DATABASE: ${DB_NAME:-heating_ops}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${DB_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [app]
+
+  # ---------------- 向量数据库（Milvus 服务端：etcd + MinIO + standalone）----------------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    # 单节点 etcd 只需公告/监听地址与数据目录。
+    # 注意：不要加 --initial-cluster=etcd=... —— etcd 的成员名默认是 "default"，
+    # 与 initial-cluster 里写的名字对不上会直接致命退出（"couldn't find local name"）。
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks: [milvus]
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks: [milvus]
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.3.5
+    container_name: milvus-standalone
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - milvus
+      - app
+
+  # ---------------- 一次性初始化：建表入库 + 构建知识库 ----------------
+  # 只在首次部署时真正干活；之后重复 up 会重新入库（幂等：--reset 清表后重灌）。
+  # 不想每次 up 都重灌的话，把它注释掉并手工执行一次即可（见 readme 第九节）。
+  init-data:
+    build:
+      context: .
+      # 构建期代理：pip 需要出网。留空则直连（能直连外网的机器不用填）
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    # 与 agent-app 共用同一个镜像名：compose 只构建一次，两个服务复用（否则会构建两遍）
+    image: heating-ops-app:local
+    container_name: heating-init
+    # 这是一次性任务容器，不跑 API；镜像里继承的 HEALTHCHECK（探 /health）必然失败，
+    # 会让它一直显示 unhealthy，属误报，故禁用。
+    healthcheck:
+      disable: true
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-123456}
+      DB_NAME: ${DB_NAME:-heating_ops}
+      MILVUS_DB_URI: http://milvus-standalone:19530
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-heating_knowledge}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_LOCAL_PATH: /models/bert-base-chinese
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+    volumes:
+      - ./documents:/app/documents:ro
+      - ${EMBEDDING_LOCAL_DIR:-./models/bert-base-chinese}:/models/bert-base-chinese:ro
+    # 先检查向量模型目录：挂成空目录时给出可执行的提示，而不是抛一句费解的加载错误
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f /models/bert-base-chinese/config.json ]; then
+          echo "=============================================================="
+          echo "向量模型目录为空：/models/bert-base-chinese 里没有 config.json"
+          echo "请在项目根目录的 .env 里设置："
+          echo "    EMBEDDING_LOCAL_DIR=D:/HuanJing/huggingface_model/bert-base-chinese"
+          echo "（WSL 里用 /mnt/d/... 形式；或改用 EMBEDDING_PROVIDER=openai）"
+          echo "=============================================================="
+          exit 1
+        fi
+        python heat_db.py --init --load all && python document_processor.py --ingest
+    depends_on:
+      mysql:
+        condition: service_healthy
+      milvus-standalone:
+        condition: service_healthy
+    networks: [app, milvus]
+
+  # ---------------- 应用（后端 + 前端静态资源，同端口）----------------
+  agent-app:
+    build:
+      context: .
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: heating-ops-app:local
+    container_name: heating-app
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-123456}
+      DB_NAME: ${DB_NAME:-heating_ops}
+      # 部署连 Milvus 服务端（不是本地 Lite 文件）
+      MILVUS_DB_URI: http://milvus-standalone:19530
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-heating_knowledge}
+      MILVUS_TIMEOUT: "10"
+      # 大模型与向量模型：密钥从 .env 注入，不打进镜像
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # 按角色指定模型（留空则回退 LLM_MODEL）—— 不传的话容器里这项配置会静默失效
+      LLM_MODEL_RETRIEVER: ${LLM_MODEL_RETRIEVER:-}
+      LLM_MODEL_ANALYST: ${LLM_MODEL_ANALYST:-}
+      LLM_MODEL_WRITER: ${LLM_MODEL_WRITER:-}
+      LLM_MODEL_REVIEWER: ${LLM_MODEL_REVIEWER:-}
+      AGENT_USE_LLM: ${AGENT_USE_LLM:-true}
+      # 走本地 Ollama 时用 host.docker.internal 访问宿主机的 Ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_LOCAL_PATH: /models/bert-base-chinese
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      HEATING_START_DATE: ${HEATING_START_DATE:-}
+      DEGREE_DAY_STATION: ${DEGREE_DAY_STATION:-}
+      AGENT_APP_HOST: 0.0.0.0
+      AGENT_APP_PORT: "5000"
+      DOCUMENTS_DIR: /app/documents
+      UPLOAD_FOLDER: /app/uploads
+      # 运行期代理：调用大模型接口需要出网。
+      # NO_PROXY 必须含内部服务名，否则「应用 → Milvus/MySQL」的连接会被绕进代理而失败。
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mysql,milvus-standalone,etcd,minio,agent-app,nginx-proxy}
+    volumes:
+      - ./documents:/app/documents:ro
+      - app-uploads:/app/uploads
+      - ${EMBEDDING_LOCAL_DIR:-./models/bert-base-chinese}:/models/bert-base-chinese:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      milvus-standalone:
+        condition: service_healthy
+      init-data:
+        condition: service_completed_successfully
+    networks: [app, milvus]
+
+  # ---------------- 反向代理（SSE 需关闭缓冲）----------------
+  nginx-proxy:
+    image: nginx:1.25-alpine
+    container_name: heating-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      agent-app:
+        condition: service_healthy
+    networks: [app]
+
+volumes:
+  mysql-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  app-uploads:
+
+networks:
+  milvus:
+    driver: bridge
+  app:
+    driver: bridge
