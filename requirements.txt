@@ -1,0 +1,39 @@
+flask>=2.3.0
+flask-cors>=4.0.0
+numpy>=1.24.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# 关系数据库（供热运营数据）
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+
+# 数据解析（业务表 / 数据字典 / 气象与 SCADA 时序）
+pandas>=2.0.0
+openpyxl>=3.1.0
+python-docx>=1.1.0
+# 规范文档（PDF）解析
+pypdf>=4.0.0
+
+# 向量数据库
+# 说明：
+#   * pymilvus **必须钉在 2.3.x**，与开发环境、以及 Milvus 服务端（v2.3.5）保持一致。
+#     曾因写成 >=2.3.8 让容器装成 3.0.2：3.x 的 MilvusClient 语义变了
+#     （不再自动建索引），集合会「有数据但载不进来、检索不到」，且与 2.3.x 服务端不匹配。
+#   * protobuf 需 >=5.26 —— pymilvus 生成的 pb2 代码依赖 google.protobuf.runtime_version
+#   * milvus-lite 提供嵌入式本地向量库（开发环境，无需 Docker）；
+#     部署改用 Milvus 服务端时可不装，但保留对开发无影响
+pymilvus>=2.3.8,<2.4
+protobuf>=5.26,<6
+milvus-lite>=3.0
+# marshmallow 必须钉在 3.x：environs（pymilvus 的依赖）在 import 时读
+# marshmallow.__version_info__，该属性在 4.x 已被移除 —— 装成 4.x 会让 pymilvus
+# 直接 import 失败（AttributeError: module 'marshmallow' has no attribute '__version_info__'）。
+marshmallow>=3.13,<4
+
+# 本地向量模型（EMBEDDING_PROVIDER=local 时需要）
+# 说明：
+#   * transformers 必须是 4.x —— 5.x 要求 torch>=2.6，而本项目锁 torch 2.5.1
+#   * torch 不在此处声明：本机按自身环境安装（开发机为 2.5.1+cu121）；
+#     Docker 镜像里由 Dockerfile 从 PyTorch 官方 CPU 源单独安装，避免拉取 CUDA 版
+transformers>=4.45,<5
